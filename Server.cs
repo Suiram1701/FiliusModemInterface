@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using FiliusModemInterface.Filius;
+using FiliusModemInterface.Filius.Vermittelungsschicht;
 using FiliusModemInterface.JavaObjectStream;
 using static FiliusModemInterface.Program;
 
@@ -65,13 +66,15 @@ public class Server(IPAddress ip, int port)
             return;
         }
         
-        stream.ReadTimeout = _idleProcessTimeout;
-
         long lastPosition = 0;
         
         var buffer = new byte[1024];
         using MemoryStream memory = new();
-        using JavaObjectReader reader = new(memory);
+        using JavaObjectReader objectReader = new(memory);
+
+        // long lastTransmit = 0;
+        // using MemoryStream writeBuffer = new();
+        using JavaObjectWriter objectWriter = new(stream, JavaObjectSerializer.GetClassDesc);
         while (!ct.IsCancellationRequested && client.Connected)
         {
             try
@@ -98,8 +101,35 @@ public class Server(IPAddress ip, int port)
                 try
                 {
                     memory.Seek(lastPosition, SeekOrigin.Begin);
-                    var frame = JavaObjectSerializer.DeserializeObject<EthernetFrame>(reader.ReadObject());
-                    LogInfo($"Read frame from client {id}: {frame}");
+                    
+                    var frame = JavaObjectSerializer.DeserializeObject<EthernetFrame>(objectReader.ReadObject());
+                    if (frame.Payload is ArpPaket payload)
+                    {
+                        EthernetFrame response = new()
+                        {
+                            SourceMac = "01:23:45:67:89:AB",
+                            DestinationMac = frame.SourceMac,
+                            Type = frame.Type,
+                            Payload = new ArpPaket
+                            {
+                                Operation = ArpPaket.Reply,
+                                SourceMac = "01:23:45:67:89:AB",
+                                SourceIP = "192.168.0.11",
+                                TargetMac = frame.SourceMac,
+                                TargetIP = "192.168.0.11",
+                                Type = payload.Type,
+                                ArpPacketNumber = payload.ArpPacketNumber + 1,
+                                ArpPacketNumberCounter = payload.ArpPacketNumberCounter + 1
+                            }
+                        };
+                        
+                        JavaObject serialized = JavaObjectSerializer.SerializeObject(response);
+                        objectWriter.WriteObject(serialized);
+                        await stream.FlushAsync(ct).ConfigureAwait(false);
+                        // lastTransmit = writeBuffer.Position;
+                        
+                        LogInfo("Sendet ARP reply");
+                    }
                     
                     lastPosition = memory.Length;
                 }
@@ -115,5 +145,7 @@ public class Server(IPAddress ip, int port)
                 continue;
             }
         }
+        
+        LogError($"Client {id} disconnected");
     }
 }

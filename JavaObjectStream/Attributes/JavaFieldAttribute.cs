@@ -5,5 +5,5 @@ public sealed class JavaFieldAttribute(string fieldName) : Attribute
 {
     public string FieldName { get; } = fieldName;
 
-    public char? TypeCode { get; init; } = null;
+    public string? ClassName { get; init; }
 }

@@ -4,7 +4,7 @@ using FiliusModemInterface.JavaObjectStream.Attributes;
 namespace FiliusModemInterface.Filius.Vermittelungsschicht;
 
 [DebuggerDisplay("{ToString(),nq}")]
-[JavaClass("filius.software.vermittlungsschicht.ArpPaket")]
+[JavaClass("filius.software.vermittlungsschicht.ArpPaket", SerialVersionUid = 1L)]
 public class ArpPaket : ProtocolDataUnit
 {
     public const int Request = 1;

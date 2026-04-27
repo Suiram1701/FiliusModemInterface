@@ -1,30 +1,24 @@
 using System.Net;
 using System.Text;
+using static FiliusModemInterface.JavaObjectStream.JavaSerializerHelper;
 
 namespace FiliusModemInterface.JavaObjectStream;
 
 /// <summary>
 /// A stream reader which is beable to parse a binary java object stream. The reader doesn't care about the stream header. The first 4 bytes have to be read
 /// </summary>
-/// <remarks>The main part of this class and used dtos were written by Claude.ai</remarks>
-/// <param name="stream">The stream to read from.</param>
-public sealed class JavaObjectReader(Stream stream) : IDisposable
+/// <remarks>The main part of this class and used dtos were written by Claude.ai and modified by me to work.</remarks>
+public sealed class JavaObjectReader : IDisposable
 {
-    private const byte TcNull          = 0x70;
-    private const byte TcReference     = 0x71;
-    private const byte TcClassDesc     = 0x72;
-    private const byte TcObject        = 0x73;
-    private const byte TcString        = 0x74;
-    private const byte TcArray         = 0x75;
-    private const byte TcEndBlockData  = 0x78;
-    private const byte TcBlockData     = 0x77;
-    private const byte TcBlockDataLong = 0x7A;
-    private const byte TcLongString    = 0x7C;
+    private readonly BinaryReader _reader;
+    private readonly List<object> _handles = [];
 
-    private readonly BinaryReader _reader = new(stream, Encoding.UTF8, leaveOpen: true);
-
-    private List<object> _handles = new();
-    private const int BaseWireHandle = 0x7E0000;
+    public JavaObjectReader(Stream stream, Encoding? encoding = null)
+    {
+        if (stream is not { CanRead: true, CanSeek: true })
+            throw new ArgumentException("Stream must be readable and seekable", nameof(stream));
+        _reader = new BinaryReader(stream, encoding ?? Encoding.UTF8);
+    }
     
     public JavaObject ReadObject()
     {
@@ -73,9 +67,9 @@ public sealed class JavaObjectReader(Stream stream) : IDisposable
         if (classDesc.SuperClass != null)
             ReadClassData(obj, classDesc.SuperClass);
 
-        if (classDesc.IsExternalizable)
+        if (classDesc.ClassDescFlags.HasFlag(JavaClassFlags.Externalizable))
         {
-            SkipAnnotations();
+            obj.RawData = CaptureAnnotation();
             return;
         }
 
@@ -85,8 +79,8 @@ public sealed class JavaObjectReader(Stream stream) : IDisposable
             obj.Fields[field.Name] = value;
         }
 
-        if (classDesc.HasWriteMethod)
-            SkipAnnotations();
+        if (classDesc.ClassDescFlags.HasFlag(JavaClassFlags.WriteMethod))
+            obj.RawData = CaptureAnnotation();
     }
 
     private object ReadFieldValue(char typeCode)
@@ -94,12 +88,12 @@ public sealed class JavaObjectReader(Stream stream) : IDisposable
         return typeCode switch
         {
             'B' => _reader.ReadSByte(),
-            'C' => (char)ReadU16(),
-            'D' => ReadDouble(),
-            'F' => ReadFloat(),
-            'I' => ReadS32(),
-            'J' => ReadS64(),
-            'S' => ReadS16(),
+            'C' => (char)ReadU16(_reader),
+            'D' => ReadDouble(_reader),
+            'F' => ReadFloat(_reader),
+            'I' => ReadS32(_reader),
+            'J' => ReadS64(_reader),
+            'S' => ReadS16(_reader),
             'Z' => _reader.ReadBoolean(),
             '[' => ReadContent()!, // Array
             'L' => ReadContent()!, // Objekt-Referenz
@@ -121,22 +115,22 @@ public sealed class JavaObjectReader(Stream stream) : IDisposable
         int index = _handles.Count;
         AssignHandle(null!);     // Dummy
         
-        string className       = ReadUtf();
-        long   serialVersionUid = ReadS64();
+        string className       = ReadUtf(_reader);
+        long   serialVersionUid = ReadS64(_reader);
         byte   classDescFlags  = _reader.ReadByte();
-        ushort fieldCount      = ReadU16();
+        ushort fieldCount      = ReadU16(_reader);
 
         List<JavaFieldDesc> fields = new(fieldCount);
-        for (int i = 0; i < fieldCount; i++)
+        for (var i = 0; i < fieldCount; i++)
         {
             var   typeCode  = (char)_reader.ReadByte();
-            string fieldName = ReadUtf();
+            string fieldName = ReadUtf(_reader);
 
-            // Für Objekt/Array-Typen folgt der Klassenname als String-Content
-            if (typeCode == 'L' || typeCode == '[')
-                ReadContent(); // Klassenname – für unsere Zwecke ignorierbar
+            string? fieldClassName = null;
+            if (typeCode is 'L' or '[')     // Für Objekt/Array-Typen folgt der Klassenname als String-Content
+                fieldClassName = (string)ReadContent()!;
 
-            fields.Add(new JavaFieldDesc(fieldName, typeCode));
+            fields.Add(new JavaFieldDesc(fieldName, typeCode, fieldClassName?.Substring(1, fieldCount - 2)));     // An object field will start with L and ends with ;
         }
 
         // TC_ENDBLOCKDATA überspringen (optionale Annotations ignorieren)
@@ -144,7 +138,7 @@ public sealed class JavaObjectReader(Stream stream) : IDisposable
 
         JavaClassDesc superClass = ReadClassDesc();
 
-        JavaClassDesc desc = new(className, serialVersionUid, classDescFlags, fields, superClass);
+        JavaClassDesc desc = new(className, serialVersionUid, (JavaClassFlags)classDescFlags, fields, superClass);
         AssignHandle(desc, index);
         return desc;
     }
@@ -154,7 +148,7 @@ public sealed class JavaObjectReader(Stream stream) : IDisposable
         JavaClassDesc classDesc = ReadClassDesc();
         AssignHandle(null!);
 
-        int size = ReadS32();
+        int size = ReadS32(_reader);
 
         // Elementtyp aus dem Klassenname ableiten: "[B" = byte[], "[I" = int[], ...
         char elementType = classDesc.ClassName.Length > 1 ? classDesc.ClassName[1] : 'B';
@@ -176,7 +170,7 @@ public sealed class JavaObjectReader(Stream stream) : IDisposable
 
     private string ReadTcString(bool longForm)
     {
-        string s = longForm ? ReadUtfLong() : ReadUtf();
+        string s = longForm ? ReadUtfLong(_reader) : ReadUtf(_reader);
         AssignHandle(s);
         return s;
     }
@@ -185,16 +179,81 @@ public sealed class JavaObjectReader(Stream stream) : IDisposable
 
     private object ReadTcReferenceRaw()
     {
-        int handle = ReadS32() - BaseWireHandle;
+        int handle = ReadS32(_reader) - BaseWireHandle;
         return _handles[handle];
     }
 
     private byte[] ReadBlockData(bool longForm)
     {
-        int size = longForm ? ReadS32() : _reader.ReadByte();
+        int size = longForm ? ReadS32(_reader) : _reader.ReadByte();
         return _reader.ReadBytes(size);
     }
 
+    private byte[] CaptureAnnotation()
+    {
+        using MemoryStream buffer = new();
+        while (true)
+        {
+            byte tag = _reader.ReadByte();
+
+            if (tag == TcEndBlockData)
+                return buffer.ToArray();
+            buffer.WriteByte(tag);
+
+            // Restlichen Inhalt je nach Tag raw lesen
+            CaptureTagContent(tag, buffer);
+        }
+    }
+    
+    private void CaptureTagContent(byte tag, Stream buffer)
+    {
+        switch (tag)
+        {
+            case TcBlockData:
+                byte length0 = ReadAndStoreBytes(1, buffer)[0];
+                _ = ReadAndStoreBytes(length0, buffer);
+                break;
+            case TcBlockDataLong:
+                byte[] lenBytes1 = ReadAndStoreBytes(4, buffer);
+                int length1 = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(lenBytes1));
+                _ = ReadAndStoreBytes(length1, buffer);
+                break;
+            case TcString:
+                byte[] lenBytes2 = ReadAndStoreBytes(2, buffer);
+                int length2 = IPAddress.NetworkToHostOrder((short)BitConverter.ToUInt16(lenBytes2));
+                _ = ReadAndStoreBytes(length2, buffer);
+                break;
+            case TcNull:
+                break; // Nur der Tag, kein weiterer Inhalt
+            case TcReference:
+                _ = ReadAndStoreBytes(4, buffer);
+                break;
+            case TcObject:
+            case TcArray:
+                // Verschachtelte Objekte vollständig in Buffer lesen –
+                // Position merken, Content normal parsen, dann Bytes kopieren
+                long startPos = _reader.BaseStream.Position;
+                _reader.BaseStream.Position--; // Tag zurücklegen
+                ReadContent(); // Normal parsen (Handle wird registriert)
+                long endPos = _reader.BaseStream.Position;
+
+                // Gelesene Bytes in Buffer kopieren
+                long length = endPos - startPos + 1; // +1 für den Tag
+                _reader.BaseStream.Position = startPos - 1;
+                _ = ReadAndStoreBytes((int)length, buffer);
+                break;
+            default:
+                throw new NotSupportedException($"Unbekannter Annotation-Tag: 0x{tag:X2}");
+        }
+    }
+    
+    private byte[] ReadAndStoreBytes(int count, Stream buffer)
+    {
+        byte[] bytes = _reader.ReadBytes(count);
+        buffer.Write(bytes);
+        return bytes;
+    }
+    
     private void SkipAnnotations()
     {
         while (true)
@@ -217,38 +276,11 @@ public sealed class JavaObjectReader(Stream stream) : IDisposable
             _handles.Add(obj);
     }
 
-    private string ReadUtf()
+    public string ResolveReference(int handle)
     {
-        ushort length = ReadU16();
-        byte[] bytes  = _reader.ReadBytes(length);
-        return Encoding.UTF8.GetString(bytes);
+        object resolved = _handles[handle - 0x7E0000];
+        return resolved as string ?? throw new InvalidDataException($"Handle does not point to string: {resolved.GetType().Name}");
     }
-
-    private string ReadUtfLong()
-    {
-        long   length = ReadS64();
-        byte[] bytes  = _reader.ReadBytes((int)length);
-        return Encoding.UTF8.GetString(bytes);
-    }
-
-    private ushort ReadU16() => (ushort)IPAddress.NetworkToHostOrder((short)_reader.ReadUInt16());
-    private short  ReadS16() => IPAddress.NetworkToHostOrder(_reader.ReadInt16());
-    private int    ReadS32() => IPAddress.NetworkToHostOrder(_reader.ReadInt32());
-    private long   ReadS64() => IPAddress.NetworkToHostOrder(_reader.ReadInt64());
-
-    private float ReadFloat()
-    {
-        byte[] b = _reader.ReadBytes(4);
-        if (BitConverter.IsLittleEndian) Array.Reverse(b);
-        return BitConverter.ToSingle(b);
-    }
-
-    private double ReadDouble()
-    {
-        byte[] b = _reader.ReadBytes(8);
-        if (BitConverter.IsLittleEndian) Array.Reverse(b);
-        return BitConverter.ToDouble(b);
-    }
-
+    
     public void Dispose() => _reader.Dispose();
 }
