@@ -1,5 +1,4 @@
 using System.Reflection;
-using System.Text;
 using FiliusModemInterface.JavaObjectStream.Attributes;
 
 namespace FiliusModemInterface.JavaObjectStream;
@@ -16,82 +15,51 @@ public static class JavaObjectSerializer
         { typeof(string), "java/lang/String" },
         { typeof(Filius.Utils.HashSet), "java/util/Set" }
     }.AsReadOnly();
-    
-    public static JavaObject SerializeObject(object @object, Encoding? encoding = null)
-    {
-        Type type = @object.GetType();
-        if (type.GetCustomAttribute<JavaClassAttribute>() is not { } classAttribute)
-            throw new NotSupportedException($"Cannot deserialize object of type {type}");
-        
-        JavaObject obj = new(classAttribute.ClassName);
-        if (classAttribute.ClassFlags.HasFlag(JavaClassFlags.Externalizable) ||
-            classAttribute.ClassFlags.HasFlag(JavaClassFlags.WriteMethod))
-        {
-            MethodInfo writeMethod = type.GetMethod("WriteObject", BindingFlags.Public | BindingFlags.Instance, [typeof(BinaryWriter)])
-                                    ?? throw new NotImplementedException($"Type {type} does not implement void WriteObject(System.IO.BinaryWriter) correctly!");
-            using MemoryStream ms = new();
-            using BinaryWriter writer = new(ms, encoding ?? Encoding.UTF8, leaveOpen: true);
-            writeMethod.Invoke(@object, [writer]);
 
-            obj.RawData = ms.ToArray();
-        }
-        
-        foreach ((PropertyInfo propertyInfo, JavaFieldAttribute? attribute) in type
-                     .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                     .Select(info => (info, info.GetCustomAttribute<JavaFieldAttribute>(true)))
-                     .Where(pair => pair.Item2 is not null))
+    public static Type? GetTypeByJavaClass(string className)
+    {
+        lock (_lock)
         {
-            object? value = propertyInfo.GetValue(@object);
-            if (GetFieldDesc(propertyInfo, attribute!).TypeCode == 'L' && propertyInfo.PropertyType != typeof(string))
-                value = value is not null ? SerializeObject(value) : null;
-            obj.Fields[attribute!.FieldName] = value!;
+            if (_classesCache.Count == 0)
+            {
+                foreach ((Type @class, JavaClassAttribute? attribute) in Assembly.GetExecutingAssembly()
+                             .GetTypes()
+                             .Select(t => (t, t.GetCustomAttribute<JavaClassAttribute>()))
+                             .Where(pair => pair.Item2 is not null))
+                {
+                    _classesCache.Add(attribute!.ClassName, @class);
+                }
+            }
+            
+            return _classesCache.GetValueOrDefault(className);
         }
-        return obj;
     }
     
-    public static T DeserializeObject<T>(JavaObject obj, Encoding? encoding = null)
-    {
-        object @object = DeserializeObject(obj, encoding);
-        if (@object.GetType() != typeof(T))
-            throw new InvalidOperationException($"Unable to deserialize object {@object.GetType()} ({obj.ClassName}) into {typeof(T)}");
-        return (T)@object;
-    }
-    
-    public static object DeserializeObject(JavaObject obj, Encoding? encoding = null)
-    {
-        if (GetTypeByJavaClass(obj.ClassName) is not { } type)
-            throw new NotSupportedException($"Cannot deserialize object of type {obj.ClassName}");
-        var classAttribute = type.GetCustomAttribute<JavaClassAttribute>()!;
-
-        object instance = Activator.CreateInstance(type)!;
-        if (classAttribute.ClassFlags.HasFlag(JavaClassFlags.Externalizable) ||
-            classAttribute.ClassFlags.HasFlag(JavaClassFlags.WriteMethod))
-        {
-            MethodInfo readMethod = type.GetMethod("ReadObject", BindingFlags.Public | BindingFlags.Instance, [typeof(BinaryReader)])
-                                    ?? throw new NotImplementedException($"Type {type} does not implement void ReadObject(System.IO.BinaryReader) correctly!");
-            using BinaryReader reader = new(new MemoryStream(obj.RawData ?? []), encoding ?? Encoding.UTF8, leaveOpen: false);
-            readMethod.Invoke(instance, [reader]);
-        }
-        
-        foreach ((string fieldName, object value) in obj.Fields)
-        {
-            PropertyInfo? property = GetPropertyByFieldName(obj.ClassName, fieldName);
-            if (property is null)
-                throw new NotSupportedException($"Field {fieldName} isn't supported on type {type}");
-
-            if (value is JavaObject valueObject)
-                property.SetValue(instance, DeserializeObject(valueObject));
-            else
-                property.SetValue(instance, value);
-        }
-        
-        return instance;
-    }
-
     public static JavaClassDesc GetClassDesc(string className)
     {
         Type type = GetTypeByJavaClass(className) ?? throw new NotSupportedException($"Class {className} is not supported.");
         return GetClassDesc(type);
+    }
+    
+    public static PropertyInfo? GetPropertyByFieldName(string className, string fieldName)
+    {
+        var key = $"{className}.{fieldName}";
+        lock (_lock)
+        {
+            if (!_propertiesCache.ContainsKey(key))
+            {
+                Type type = GetTypeByJavaClass(className)!;
+                foreach ((PropertyInfo propertyInfo, JavaFieldAttribute? attribute) in type
+                             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                             .Select(info => (info, info.GetCustomAttribute<JavaFieldAttribute>(true)))
+                             .Where(pair => pair.Item2 is not null))
+                {
+                    _propertiesCache.TryAdd($"{className}.{attribute!.FieldName}", propertyInfo);
+                }
+            }
+
+            return _propertiesCache.GetValueOrDefault(key);
+        }
     }
     
     public static JavaClassDesc GetClassDesc(Type type)
@@ -118,7 +86,7 @@ public static class JavaObjectSerializer
             return _classesDescCache[type];
         }
     }
-
+    
     private static JavaFieldDesc GetFieldDesc(PropertyInfo info, JavaFieldAttribute attribute)
     {
         char? typeCode = info.PropertyType.Name switch
@@ -145,45 +113,5 @@ public static class JavaObjectSerializer
         }
 
         return new JavaFieldDesc(attribute.FieldName, typeCode.Value, fieldClassName);
-    }
-    
-    private static Type? GetTypeByJavaClass(string className)
-    {
-        lock (_lock)
-        {
-            if (_classesCache.Count == 0)
-            {
-                foreach ((Type @class, JavaClassAttribute? attribute) in Assembly.GetExecutingAssembly()
-                             .GetTypes()
-                             .Select(t => (t, t.GetCustomAttribute<JavaClassAttribute>()))
-                             .Where(pair => pair.Item2 is not null))
-                {
-                    _classesCache.Add(attribute!.ClassName, @class);
-                }
-            }
-            
-            return _classesCache.GetValueOrDefault(className);
-        }
-    }
-
-    private static PropertyInfo? GetPropertyByFieldName(string className, string fieldName)
-    {
-        var key = $"{className}.{fieldName}";
-        lock (_lock)
-        {
-            if (!_propertiesCache.ContainsKey(key))
-            {
-                Type type = GetTypeByJavaClass(className)!;
-                foreach ((PropertyInfo propertyInfo, JavaFieldAttribute? attribute) in type
-                             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                             .Select(info => (info, info.GetCustomAttribute<JavaFieldAttribute>(true)))
-                             .Where(pair => pair.Item2 is not null))
-                {
-                    _propertiesCache.TryAdd($"{className}.{attribute!.FieldName}", propertyInfo);
-                }
-            }
-
-            return _propertiesCache.GetValueOrDefault(key);
-        }
     }
 }

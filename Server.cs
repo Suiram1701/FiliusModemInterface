@@ -71,9 +71,6 @@ public class Server(IPAddress ip, int port)
         var buffer = new byte[1024];
         using MemoryStream memory = new();
         using JavaObjectReader objectReader = new(memory);
-
-        // long lastTransmit = 0;
-        // using MemoryStream writeBuffer = new();
         using JavaObjectWriter objectWriter = new(stream, JavaObjectSerializer.GetClassDesc);
         while (!ct.IsCancellationRequested && client.Connected)
         {
@@ -83,7 +80,7 @@ public class Server(IPAddress ip, int port)
                 {
                     using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     cts.CancelAfter(_idleProcessTimeout);
-                    
+
                     var bytesRead = 0;
                     try
                     { bytesRead = await stream.ReadAsync(buffer.AsMemory(), cts.Token).ConfigureAwait(false); }
@@ -94,15 +91,15 @@ public class Server(IPAddress ip, int port)
                         return;
                     await memory.WriteAsync(buffer.AsMemory(0, bytesRead), ct).ConfigureAwait(false);
                 }
-                
+
                 if (memory.Position - lastPosition == 0)
                     continue;
 
                 try
                 {
                     memory.Seek(lastPosition, SeekOrigin.Begin);
-                    
-                    var frame = JavaObjectSerializer.DeserializeObject<EthernetFrame>(objectReader.ReadObject());
+
+                    var frame = objectReader.ReadObject<EthernetFrame>();
                     if (frame.Payload is ArpPaket payload)
                     {
                         EthernetFrame response = new()
@@ -122,19 +119,17 @@ public class Server(IPAddress ip, int port)
                                 ArpPacketNumberCounter = payload.ArpPacketNumberCounter + 1
                             }
                         };
-                        
-                        JavaObject serialized = JavaObjectSerializer.SerializeObject(response);
-                        objectWriter.WriteObject(serialized);
+
+                        objectWriter.WriteObject(response);
                         await stream.FlushAsync(ct).ConfigureAwait(false);
-                        // lastTransmit = writeBuffer.Position;
-                        
+
                         LogInfo("Sendet ARP reply");
                     }
-                    
+
                     lastPosition = memory.Length;
                 }
-                catch (EndOfStreamException) { }     // Do nothing
-                finally 
+                catch (EndOfStreamException) { } // Do nothing
+                finally
                 {
                     memory.Seek(0, SeekOrigin.End);
                 }

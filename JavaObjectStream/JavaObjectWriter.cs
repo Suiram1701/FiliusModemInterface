@@ -1,10 +1,12 @@
+using System.Reflection;
 using System.Text;
+using FiliusModemInterface.JavaObjectStream.Attributes;
 using static FiliusModemInterface.JavaObjectStream.JavaSerializerHelper;
 
 namespace FiliusModemInterface.JavaObjectStream;
 
 /// <summary>
-/// The main part of this class and used dtos were written by Claude.ai and modified by me to work.
+/// The basic part of this class and used dtos were written by Claude.ai and modified by me to work.
 /// </summary>
 public sealed class JavaObjectWriter : IDisposable
 {
@@ -22,14 +24,23 @@ public sealed class JavaObjectWriter : IDisposable
         _getClassDesc = getClassDesc;
     }
 
-    public void WriteObject(JavaObject obj)
+    public void WriteObject(object obj)
     {
-        JavaClassDesc classDesc = _getClassDesc(obj.ClassName);
+        if (obj is string str)
+        {
+            WriteStringObject(str);
+            return;
+        }
+        
+        Type type = obj.GetType();
+        if (type.GetCustomAttribute<JavaClassAttribute>() is not { } classAttribute)
+            throw new NotSupportedException($"Cannot deserialize object of type {type}");
+        
+        JavaClassDesc classDesc = _getClassDesc(classAttribute.ClassName);
         
         _writer.Write(TcObject);
         WriteClassDescEntry(classDesc);
-        WriteClassData(obj, classDesc);
-        _writer.Flush();
+        WriteClassData(obj, type, classDesc);
     }
 
     private void WriteClassDescEntry(JavaClassDesc? classDesc)
@@ -40,7 +51,7 @@ public sealed class JavaObjectWriter : IDisposable
             return;
         }
 
-        if (_handles.TryGetValue(classDesc, out int handle))
+        if (TryGetHandle(classDesc, out int handle))
         {
             _writer.Write(TcReference);
             WriteS32(_writer, handle + BaseWireHandle);
@@ -63,7 +74,7 @@ public sealed class JavaObjectWriter : IDisposable
                 continue;
             
             // Für Objekt/Array-Felder muss der Klassenname als TC_STRING folgen
-            if (_handles.TryGetValue(field.ClassName!, out int classNameHandle))
+            if (TryGetHandle(field.ClassName!, out int classNameHandle))
             {
                 _writer.Write(TcReference);
                 WriteS32(_writer, classNameHandle + BaseWireHandle);
@@ -83,35 +94,32 @@ public sealed class JavaObjectWriter : IDisposable
         WriteClassDescEntry(classDesc.SuperClass);
     }
     
-    private void WriteClassData(JavaObject obj, JavaClassDesc classDesc)
+    private void WriteClassData(object obj, Type type, JavaClassDesc classDesc)
     {
         AssignHandle(obj);
-        WriteClassDataRecursive(obj, classDesc);
+        WriteClassDataRecursive(obj, type, classDesc);
     }
 
-    private void WriteClassDataRecursive(JavaObject obj, JavaClassDesc classDesc)
+    private void WriteClassDataRecursive(object obj, Type type, JavaClassDesc classDesc)
     {
         if (classDesc.SuperClass is not null)
-            WriteClassDataRecursive(obj, classDesc.SuperClass);
+            WriteClassDataRecursive(obj, type.BaseType!, classDesc.SuperClass);
 
-        if (classDesc.ClassDescFlags.HasFlag(JavaClassFlags.Externalizable))
+        if (!classDesc.ClassDescFlags.HasFlag(JavaClassFlags.Externalizable))
         {
-            if (obj.RawData is not null)
-                _writer.Write(obj.RawData);
-            _writer.Write(TcEndBlockData);
-            return;
+            foreach (JavaFieldDesc field in classDesc.Fields.OrderBy(field => field.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                PropertyInfo property = JavaObjectSerializer.GetPropertyByFieldName(classDesc.ClassName, field.Name)!;
+                WriteFieldValue(field.TypeCode, property.GetValue(obj));
+            }
         }
 
-        foreach (JavaFieldDesc field in classDesc.Fields.OrderBy(field => field.Name, StringComparer.OrdinalIgnoreCase))
+        if (classDesc.ClassDescFlags.HasFlag(JavaClassFlags.WriteMethod)
+            || classDesc.ClassDescFlags.HasFlag(JavaClassFlags.Externalizable))
         {
-            object? value = obj.Fields.GetValueOrDefault(field.Name);
-            WriteFieldValue(field.TypeCode, value);
-        }
-
-        if (classDesc.ClassDescFlags.HasFlag(JavaClassFlags.WriteMethod))
-        {
-            if (obj.RawData is not null)
-                _writer.Write(obj.RawData);
+            MethodInfo writeMethod = type.GetMethod("WriteObject", BindingFlags.Public | BindingFlags.Instance, [typeof(BinaryWriter), typeof(JavaObjectWriter)])
+                                     ?? throw new NotImplementedException($"Type {type} does not implement the writer correctly!");
+            writeMethod.Invoke(obj, [_writer, this]);
             _writer.Write(TcEndBlockData);
         }
     }
@@ -150,7 +158,7 @@ public sealed class JavaObjectWriter : IDisposable
         {
             _writer.Write(TcNull);
         }
-        else if (_handles.TryGetValue(value, out int handle))
+        else if (TryGetHandle(value, out int handle))
         {
             _writer.Write(TcReference);
             WriteS32(_writer, handle + BaseWireHandle);
@@ -159,13 +167,9 @@ public sealed class JavaObjectWriter : IDisposable
         {
             WriteStringObject(str);
         }
-        else if (value is JavaObject nested)
-        {
-            WriteObject(nested);
-        }
         else
         {
-            throw new NotSupportedException($"Unbekannter Objekttyp: {value.GetType().Name}");
+            WriteObject(value);
         }
     }
 
@@ -177,7 +181,7 @@ public sealed class JavaObjectWriter : IDisposable
             return;
         }
 
-        if (_handles.TryGetValue(value, out int handle))
+        if (TryGetHandle(value, out int handle))
         {
             _writer.Write(TcReference);
             WriteS32(_writer, handle + BaseWireHandle);
@@ -225,7 +229,9 @@ public sealed class JavaObjectWriter : IDisposable
 
     // --- Handle-Verwaltung ---
 
-    private void AssignHandle(object obj, int index = -1)
+    public bool TryGetHandle(object value, out int handle) => _handles.TryGetValue(value, out handle);
+    
+    public void AssignHandle(object obj, int index = -1)
     {
         if (index == -1)
             index = _indexCounter++;

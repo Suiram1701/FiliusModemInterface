@@ -1,5 +1,7 @@
 using System.Net;
+using System.Reflection;
 using System.Text;
+using FiliusModemInterface.JavaObjectStream.Attributes;
 using static FiliusModemInterface.JavaObjectStream.JavaSerializerHelper;
 
 namespace FiliusModemInterface.JavaObjectStream;
@@ -7,9 +9,10 @@ namespace FiliusModemInterface.JavaObjectStream;
 /// <summary>
 /// A stream reader which is beable to parse a binary java object stream. The reader doesn't care about the stream header. The first 4 bytes have to be read
 /// </summary>
-/// <remarks>The main part of this class and used dtos were written by Claude.ai and modified by me to work.</remarks>
+/// <remarks>The basic part of this class and used dtos were written by Claude.ai and modified by me to work.</remarks>
 public sealed class JavaObjectReader : IDisposable
 {
+    private readonly Encoding _encoding;
     private readonly BinaryReader _reader;
     private readonly List<object> _handles = [];
 
@@ -17,15 +20,24 @@ public sealed class JavaObjectReader : IDisposable
     {
         if (stream is not { CanRead: true, CanSeek: true })
             throw new ArgumentException("Stream must be readable and seekable", nameof(stream));
-        _reader = new BinaryReader(stream, encoding ?? Encoding.UTF8);
+        _encoding ??= Encoding.UTF8;
+        _reader = new BinaryReader(stream, _encoding);
     }
     
-    public JavaObject ReadObject()
+    public T ReadObject<T>()
+    {
+        object @object = ReadObject();
+        if (@object.GetType() != typeof(T))
+            throw new InvalidOperationException($"Unable to deserialize object {@object.GetType()} into {typeof(T)}");
+        return (T)@object;
+    }
+    
+    public object ReadObject()
     {
         int oldHandlesCount = _handles.Count;
         try
         {
-            return (JavaObject)ReadContent()!;
+            return ReadContent()!;
         }
         catch (EndOfStreamException)
         {
@@ -52,35 +64,48 @@ public sealed class JavaObjectReader : IDisposable
         };
     }
 
-    private JavaObject ReadTcObject()
+    private object ReadTcObject()
     {
         JavaClassDesc classDesc = ReadClassDesc();
-        JavaObject obj = new(classDesc.ClassName);
-        AssignHandle(obj);
+        if (JavaObjectSerializer.GetTypeByJavaClass(classDesc.ClassName) is not { } type)
+            throw new NotSupportedException($"Cannot deserialize object of type {classDesc.ClassName}");
+        
+        var classAttribute = type.GetCustomAttribute<JavaClassAttribute>()!;
+        if (classAttribute.SerialVersionUid != 0L && classAttribute.SerialVersionUid != classDesc.SerialVersionUid)
+            throw new InvalidOperationException($"Read version Uid {classDesc.SerialVersionUid} does not match the expected version {classAttribute.SerialVersionUid}");
+        if (classAttribute.ClassFlags != classDesc.ClassDescFlags)
+            throw new InvalidOperationException($"Read flags {classDesc.ClassDescFlags:X2} does not match the flags {classAttribute.ClassFlags:X2}");
+        
+        object instance = Activator.CreateInstance(type)!;
+        AssignHandle(instance);
 
-        ReadClassData(obj, classDesc);
-        return obj;
+        ReadClassData(instance, type, classDesc);
+        return instance;
     }
 
-    private void ReadClassData(JavaObject obj, JavaClassDesc classDesc)
+    private void ReadClassData(object obj, Type type, JavaClassDesc classDesc)
     {
         if (classDesc.SuperClass != null)
-            ReadClassData(obj, classDesc.SuperClass);
+            ReadClassData(obj, type.BaseType!, classDesc.SuperClass);
 
-        if (classDesc.ClassDescFlags.HasFlag(JavaClassFlags.Externalizable))
+        if (!classDesc.ClassDescFlags.HasFlag(JavaClassFlags.Externalizable))
         {
-            obj.RawData = CaptureAnnotation();
-            return;
+            foreach (JavaFieldDesc field in classDesc.Fields)
+            {
+                PropertyInfo property = JavaObjectSerializer.GetPropertyByFieldName(classDesc.ClassName, field.Name)!;
+                property.SetValue(obj, ReadFieldValue(field.TypeCode));
+            }
         }
 
-        foreach (JavaFieldDesc field in classDesc.Fields)
+        if (classDesc.ClassDescFlags.HasFlag(JavaClassFlags.WriteMethod)
+            || classDesc.ClassDescFlags.HasFlag(JavaClassFlags.Externalizable))
         {
-            object value = ReadFieldValue(field.TypeCode);
-            obj.Fields[field.Name] = value;
+            MethodInfo readMethod = type.GetMethod("ReadObject", BindingFlags.Public | BindingFlags.Instance, [typeof(BinaryReader), typeof(JavaObjectReader)])
+                                    ?? throw new NotImplementedException($"Type {type} does not implement the reader correctly!");
+            byte[] annotation = CaptureAnnotation();
+            BinaryReader annotationReader = new(new MemoryStream(annotation), _encoding, leaveOpen: false);
+            readMethod.Invoke(obj, [annotationReader, this]);
         }
-
-        if (classDesc.ClassDescFlags.HasFlag(JavaClassFlags.WriteMethod))
-            obj.RawData = CaptureAnnotation();
     }
 
     private object ReadFieldValue(char typeCode)

@@ -20,7 +20,7 @@ public class EthernetFrame : ProtocolDataUnit
     [JavaField("daten")] public ProtocolDataUnit Payload { get; set; }
 
     [JavaField("readByLauscherForMac", ClassName = "java/util/Set")]
-    public Filius.Utils.HashSet ReadByLauscherForMac { get; set; } = [];
+    public Filius.Utils.HashSet ReadByLauscherForMac { get; set; } = new();
 
     public override string ToString() => $"[src={SourceMac}, dest={DestinationMac}, type={Type}, payload={Payload}]";
 }
