@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using FiliusModemInterface.JavaObjectStream.Attributes;
 
-namespace FiliusModemInterface.Filius.Vermittelungsschicht;
+namespace FiliusModemInterface.Filius.Vermittlungsschicht;
 
 [DebuggerDisplay("{ToString(),nq}")]
 [JavaClass("filius.software.vermittlungsschicht.ArpPaket", SerialVersionUid = 1L)]

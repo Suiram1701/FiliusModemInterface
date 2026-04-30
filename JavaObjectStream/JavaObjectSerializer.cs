@@ -50,7 +50,7 @@ public static class JavaObjectSerializer
             {
                 Type type = GetTypeByJavaClass(className)!;
                 foreach ((PropertyInfo propertyInfo, JavaFieldAttribute? attribute) in type
-                             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                             .GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
                              .Select(info => (info, info.GetCustomAttribute<JavaFieldAttribute>(true)))
                              .Where(pair => pair.Item2 is not null))
                 {
@@ -75,7 +75,7 @@ public static class JavaObjectSerializer
                 JavaClassDesc? superClass = type.BaseType is not null && type.BaseType != typeof(object)
                     ? GetClassDesc(type.BaseType)
                     : null;
-                List<JavaFieldDesc> fields = type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                List<JavaFieldDesc> fields = type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
                     .Select(info => (info, info.GetCustomAttribute<JavaFieldAttribute>(true)))
                     .Where(pair => pair.Item2 is not null)
                     .Select(pair => GetFieldDesc(pair.info, pair.Item2!))
@@ -86,6 +86,11 @@ public static class JavaObjectSerializer
             return _classesDescCache[type];
         }
     }
+
+    public static IEnumerable<JavaFieldDesc> OrderFields(IEnumerable<JavaFieldDesc> fields) => fields
+        .GroupBy(field => field.TypeCode is 'L' or '[')
+        .OrderBy(group => group.Key)
+        .SelectMany(group => group.OrderBy(field => field.Name));
     
     private static JavaFieldDesc GetFieldDesc(PropertyInfo info, JavaFieldAttribute attribute)
     {

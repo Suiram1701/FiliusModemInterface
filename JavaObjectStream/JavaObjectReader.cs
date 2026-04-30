@@ -78,8 +78,8 @@ public sealed class JavaObjectReader : IDisposable
         
         object instance = Activator.CreateInstance(type)!;
         AssignHandle(instance);
-
         ReadClassData(instance, type, classDesc);
+        
         return instance;
     }
 
@@ -152,10 +152,13 @@ public sealed class JavaObjectReader : IDisposable
             string fieldName = ReadUtf(_reader);
 
             string? fieldClassName = null;
-            if (typeCode is 'L' or '[')     // Für Objekt/Array-Typen folgt der Klassenname als String-Content
+            if (typeCode is 'L' or '[') // Für Objekt/Array-Typen folgt der Klassenname als String-Content
+            {
                 fieldClassName = (string)ReadContent()!;
+                fieldClassName = fieldClassName.Substring(1, fieldClassName.Length - 2);     // An object field will start with L and ends with ;
+            }
 
-            fields.Add(new JavaFieldDesc(fieldName, typeCode, fieldClassName?.Substring(1, fieldCount - 2)));     // An object field will start with L and ends with ;
+            fields.Add(new JavaFieldDesc(fieldName, typeCode, fieldClassName));
         }
 
         // TC_ENDBLOCKDATA überspringen (optionale Annotations ignorieren)
@@ -171,6 +174,8 @@ public sealed class JavaObjectReader : IDisposable
     private object ReadTcArray()
     {
         JavaClassDesc classDesc = ReadClassDesc();
+        
+        int index = _handles.Count;
         AssignHandle(null!);
 
         int size = ReadS32(_reader);
@@ -181,15 +186,15 @@ public sealed class JavaObjectReader : IDisposable
         if (elementType == 'B')
         {
             byte[] bytes = _reader.ReadBytes(size);
-            _handles[^1] = bytes;
+            AssignHandle(bytes, index);
             return bytes;
         }
 
         var array = new object[size];
-        for (int i = 0; i < size; i++)
+        for (var i = 0; i < size; i++)
             array[i] = ReadFieldValue(elementType);
 
-        _handles[^1] = array;
+        AssignHandle(array, index);
         return array;
     }
 
@@ -292,19 +297,19 @@ public sealed class JavaObjectReader : IDisposable
             ReadContent();
         }
     }
-
-    private void AssignHandle(object obj, int index = -1)
+    
+    public string ResolveReference(int handleId)
+    {
+        object resolved = _handles[handleId - 0x7E0000];
+        return resolved as string ?? throw new InvalidDataException($"Handle does not point to string: {resolved.GetType().Name}");
+    }
+    
+    public void AssignHandle(object obj, int index = -1)
     {
         if (index > -1)
             _handles[index] = obj;
         else
             _handles.Add(obj);
-    }
-
-    public string ResolveReference(int handle)
-    {
-        object resolved = _handles[handle - 0x7E0000];
-        return resolved as string ?? throw new InvalidDataException($"Handle does not point to string: {resolved.GetType().Name}");
     }
     
     public void Dispose() => _reader.Dispose();

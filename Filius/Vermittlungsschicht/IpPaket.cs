@@ -1,10 +1,11 @@
 using System.Diagnostics;
+using FiliusModemInterface.Filius.Transportschicht;
 using FiliusModemInterface.JavaObjectStream.Attributes;
 
-namespace FiliusModemInterface.Filius.Vermittelungsschicht;
+namespace FiliusModemInterface.Filius.Vermittlungsschicht;
 
 [DebuggerDisplay("{ToString(),nq}")]
-[JavaClass("filius.software.vermittlungsschicht.IpPaket")]
+[JavaClass("filius.software.vermittlungsschicht.IpPaket", SerialVersionUid = -152582862425589970)]     // Version Uid took from running filius instance
 public class IpPaket : ProtocolDataUnit
 {
     public const int TCP = 6;
@@ -22,7 +23,8 @@ public class IpPaket : ProtocolDataUnit
     
     [JavaField("protocol")] public int Protocol { get; set; }
     
-    [JavaField("data")] public object Data { get; set; }
+    [JavaField("data", ClassName = "filius.software.transportschicht.Segment")]
+    public Segment Data { get; set; }
 
     public override string ToString() => $"[id={Id}, ttl={TTL}, protocol={Protocol}, src={SourceIP}, dest={DestinationIP}]";
 }

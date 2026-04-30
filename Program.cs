@@ -1,7 +1,5 @@
 ﻿using System.CommandLine;
 using System.Net;
-using FiliusModemInterface.Filius;
-using FiliusModemInterface.JavaObjectStream;
 
 namespace FiliusModemInterface;
 
@@ -38,22 +36,19 @@ public class Program
         args = str.Split(' ');
 #endif
         
-        RootCommand rootCommand = new();
-
-        Command serverCommand = new("server", "Starts a where one or more Filius instances can connect to. Can be used to connect more than two Filius instances together.")
+        RootCommand rootCommand = new("Starts a where one or more Filius instances can connect to. Can be used to connect more than two Filius instances together.")
         {
             _bindOption,
             _portOption
         };
-        serverCommand.SetAction((parseResult, ct) =>
+        rootCommand.SetAction((parseResult, ct) =>
         {
             IPAddress ip = parseResult.GetRequiredValue(_bindOption);
             int port = parseResult.GetRequiredValue(_portOption);
             
-            Server filiusServer = new(ip, port);
+            FiliusServer filiusServer = new(ip, port);
             return filiusServer.RunAsync(ct);
         });
-        rootCommand.Add(serverCommand);
         
         return rootCommand.Parse(args).InvokeAsync();
     }

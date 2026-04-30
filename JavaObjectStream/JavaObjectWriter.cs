@@ -41,6 +41,7 @@ public sealed class JavaObjectWriter : IDisposable
         _writer.Write(TcObject);
         WriteClassDescEntry(classDesc);
         WriteClassData(obj, type, classDesc);
+        _writer.Flush();
     }
 
     private void WriteClassDescEntry(JavaClassDesc? classDesc)
@@ -57,15 +58,15 @@ public sealed class JavaObjectWriter : IDisposable
             WriteS32(_writer, handle + BaseWireHandle);
             return;
         }
+        AssignHandle(classDesc);
 
-        int index = ReserveHandle();
         _writer.Write(TcClassDesc);
         WriteUtf(_writer, classDesc.ClassName);
         WriteS64(_writer, classDesc.SerialVersionUid);
         _writer.Write((byte)classDesc.ClassDescFlags);
         WriteU16(_writer, (ushort)classDesc.Fields.Count);
         
-        foreach (JavaFieldDesc field in classDesc.Fields.OrderBy(field => field.Name, StringComparer.OrdinalIgnoreCase))
+        foreach (JavaFieldDesc field in JavaObjectSerializer.OrderFields(classDesc.Fields))
         {
             _writer.Write((byte)field.TypeCode);
             WriteUtf(_writer, field.Name);
@@ -89,7 +90,6 @@ public sealed class JavaObjectWriter : IDisposable
         _writer.Write(TcEndBlockData);
 
         // Handle NACH den Feldern aber VOR der Superklasse zuweisen (spiegelt ReadClassDesc)
-        AssignHandle(classDesc, index);
 
         WriteClassDescEntry(classDesc.SuperClass);
     }
@@ -107,7 +107,7 @@ public sealed class JavaObjectWriter : IDisposable
 
         if (!classDesc.ClassDescFlags.HasFlag(JavaClassFlags.Externalizable))
         {
-            foreach (JavaFieldDesc field in classDesc.Fields.OrderBy(field => field.Name, StringComparer.OrdinalIgnoreCase))
+            foreach (JavaFieldDesc field in JavaObjectSerializer.OrderFields(classDesc.Fields))
             {
                 PropertyInfo property = JavaObjectSerializer.GetPropertyByFieldName(classDesc.ClassName, field.Name)!;
                 WriteFieldValue(field.TypeCode, property.GetValue(obj));

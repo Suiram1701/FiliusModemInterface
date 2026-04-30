@@ -55,7 +55,7 @@ public class HashSet
     {
         // TC_BLOCKDATA with capacity + loadFactor + size
         byte blockTag = reader.ReadByte();
-        if (blockTag != 0x77)
+        if (blockTag != TcBlockData)
             throw new InvalidDataException($"Expected TC_BLOCKDATA for HashSet metadata, got 0x{blockTag:X2}");
 
         byte blockLen = reader.ReadByte();
@@ -76,13 +76,23 @@ public class HashSet
         {
             byte tag = reader.ReadByte();
 
-            string element = tag switch
+            string element;
+            switch (tag)
             {
-                TcString => ReadUtf(reader),
-                TcLongString => ReadUtfLong(reader),
-                TcReference => objReader.ResolveReference(ReadS32(reader)),
-                _ => throw new NotSupportedException($"Unknown HashSet element tag: 0x{tag:X2}")
-            };
+                case TcString:
+                    element = ReadUtf(reader);
+                    objReader.AssignHandle(element);
+                    break;
+                case TcLongString:
+                    element = ReadUtfLong(reader);
+                    objReader.AssignHandle(element);
+                    break;
+                case TcReference:
+                    element = objReader.ResolveReference(ReadS32(reader));
+                    break;
+                default:
+                    throw new NotSupportedException($"Unknown HashSet element tag: 0x{tag:X2}");
+            }
 
             Set.Add(element);
         }
