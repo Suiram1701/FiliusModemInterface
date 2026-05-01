@@ -41,7 +41,7 @@ public sealed class JavaObjectReader : IDisposable
         }
         catch (EndOfStreamException)
         {
-            _handles.RemoveRange(oldHandlesCount, _handles.Count - (oldHandlesCount + 1));
+            _handles.RemoveRange(oldHandlesCount, _handles.Count - oldHandlesCount);
             throw;
         }
     }

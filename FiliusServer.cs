@@ -13,7 +13,6 @@ public class FiliusServer(IPAddress ip, int port)
     private const int _maxConnections = 20;
     private const int _idleProcessTimeout = 50;
 
-    private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly TcpListener _listener = new(ip, port);
     private readonly Dictionary<int, Client> _clients = new();
     private readonly Dictionary<int, Task> _handles = new();
@@ -70,7 +69,8 @@ public class FiliusServer(IPAddress ip, int port)
         using MemoryStream memory = new();
         using JavaObjectReader objectReader = new(memory);
         using JavaObjectWriter objectWriter = new(stream, JavaObjectSerializer.GetClassDesc);
-        _clients.Add(id, new Client(client, stream, objectReader, objectWriter));
+        _clients.Add(id, new Client(client, stream, objectReader, objectWriter, new SemaphoreSlim(1, 1)));
+        
         while (!ct.IsCancellationRequested && client.Connected)
         {
             try
@@ -104,7 +104,7 @@ public class FiliusServer(IPAddress ip, int port)
                     memory.Seek(lastPosition, SeekOrigin.Begin);
 
                     var frame = objectReader.ReadObject<EthernetFrame>();
-                    await HandleFrameAsync(id, frame, ct).ConfigureAwait(false);
+                    _ = HandleFrameAsync(id, frame, ct).ConfigureAwait(false);
 
                     lastPosition = memory.Length;
                     
@@ -113,9 +113,7 @@ public class FiliusServer(IPAddress ip, int port)
                 }
                 catch (EndOfStreamException)
                 {
-                } // Do nothing
-                catch (Exception ex)
-                {
+                    LogInfo("Rollback...");
                 }
                 finally
                 {
@@ -133,54 +131,60 @@ public class FiliusServer(IPAddress ip, int port)
         }
         
         LogError($"Client {id} disconnected");
+        
         _clients.Remove(id);
+        _handles.Remove(id);
+
+        foreach (string index in _macTable.Where(kvp => kvp.Value == id).Select(kvp => kvp.Key))
+            _macTable.Remove(index, out _);
     }
 
     private async Task HandleFrameAsync(int sourcePort, EthernetFrame frame, CancellationToken ct)
     {
         _macTable[frame.SourceMac] = sourcePort;
 
-        try
+        int targetPort = _macTable.GetValueOrDefault(frame.DestinationMac, defaultValue: -1);
+        if (targetPort != -1)
         {
-            await _lock.WaitAsync(ct);
-            
-            int targetPort = _macTable.GetValueOrDefault(frame.DestinationMac, defaultValue: -1);
-            if (targetPort != -1)
+            Client client = _clients[targetPort];
+            try
+            {
+                await client.WriteLock.WaitAsync(ct);
+                client.Writer.WriteObject(frame);
+                await client.Stream.FlushAsync(ct);
+            }
+            catch (IOException)
+            {
+            } // In case the connection broke.
+            finally
+            {
+                client.WriteLock.Release();
+            }
+        }
+        else
+        {
+            Client[] targetWriters = _clients
+                .Where(kvp => kvp.Key != sourcePort)
+                .Select(kvp => kvp.Value)
+                .ToArray();
+            await Parallel.ForEachAsync(targetWriters, ct, async (client, innerCt) =>
             {
                 try
                 {
-                    Client client = _clients[targetPort];
+                    await client.WriteLock.WaitAsync(innerCt);
                     client.Writer.WriteObject(frame);
-                    await client.Stream.FlushAsync(ct);
+                    await client.Stream.FlushAsync(innerCt);
                 }
                 catch (IOException)
                 {
                 } // In case the connection broke.
-            }
-            else
-            {
-                Client[] targetWriters = _clients
-                    .Where(kvp => kvp.Key != sourcePort)
-                    .Select(kvp => kvp.Value)
-                    .ToArray();
-                await Parallel.ForEachAsync(targetWriters, ct, async (client, innerCt) =>
+                finally
                 {
-                    try
-                    {
-                        client.Writer.WriteObject(frame);
-                        await client.Stream.FlushAsync(innerCt);
-                    }
-                    catch (IOException)
-                    {
-                    } // In case the connection broke.
-                });
-            }
-        }
-        finally
-        {
-            _lock.Release();
+                    client.WriteLock.Release();
+                }
+            });
         }
     }
 
-    private record Client(TcpClient TcpClient, NetworkStream Stream, JavaObjectReader Reader, JavaObjectWriter Writer);
+    private record Client(TcpClient TcpClient, NetworkStream Stream, JavaObjectReader Reader, JavaObjectWriter Writer, SemaphoreSlim WriteLock);
 }

@@ -36,7 +36,7 @@ public class Program
         args = str.Split(' ');
 #endif
         
-        RootCommand rootCommand = new("Starts a where one or more Filius instances can connect to. Can be used to connect more than two Filius instances together.")
+        RootCommand rootCommand = new("Starts a server where one or more Filius instances can connect to. It will act as a switch between these instances.")
         {
             _bindOption,
             _portOption
