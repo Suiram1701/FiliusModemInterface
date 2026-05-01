@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using FiliusModemInterface.Filius;
+using FiliusModemInterface.Filius.Vermittlungsschicht;
 using FiliusModemInterface.JavaObjectStream;
 using static FiliusModemInterface.Program;
 
@@ -14,17 +15,20 @@ public class FiliusServer(IPAddress ip, int port)
     private const int _idleProcessTimeout = 50;
 
     private readonly TcpListener _listener = new(ip, port);
+    private int _clientCounter = 0;
     private readonly Dictionary<int, Client> _clients = new();
     private readonly Dictionary<int, Task> _handles = new();
 
     private readonly ConcurrentDictionary<string, int> _macTable = new();
+    private readonly Dictionary<string, string> _respondArp = [];
+    private readonly Dictionary<string, Func<ProtocolDataUnit, CancellationToken, Task<ProtocolDataUnit>>> _macHandlers = [];
     
     public async Task RunAsync(CancellationToken ct)
     {
         _listener.Start();
         try
         {
-            LogInfo($"Startet broadcasting server. Listening on {_listener.LocalEndpoint}");
+            LogInfo($"Started broadcasting server. Listening on {_listener.LocalEndpoint}");
             while (!ct.IsCancellationRequested)
             {
                 TcpClient newClient = await _listener.AcceptTcpClientAsync(ct).ConfigureAwait(false);
@@ -36,10 +40,8 @@ public class FiliusServer(IPAddress ip, int port)
                 }
 
                 LogInfo($"New client connected {newClient.Client.RemoteEndPoint}");
-
-                int id = _clients.Count + 1;
-                Task handle = HandleClientAsync(id, newClient, ct);
-                _handles.Add(id, handle);
+                _handles.Add(_clientCounter, HandleClientAsync(_clientCounter, newClient, ct));
+                _clientCounter++;
             }
         }
         catch (TaskCanceledException)
@@ -47,6 +49,17 @@ public class FiliusServer(IPAddress ip, int port)
         }
     }
 
+    public bool RespondOn(string mac, IPAddress ip, Func<ProtocolDataUnit, CancellationToken, Task<ProtocolDataUnit>> onFrame)
+    {
+        if (_macHandlers.ContainsKey(mac))
+            return false;
+
+        _respondArp[ip.ToString()] = mac;
+        _macHandlers[mac] = onFrame;
+        LogInfo($"Starts responding on {ip} with {mac}");
+        return true;
+    }
+    
     private async Task HandleClientAsync(int id, TcpClient client, CancellationToken ct)
     {
         byte[] magicBytes = [0xAC, 0xED, 0x00, 0x05];
@@ -113,7 +126,7 @@ public class FiliusServer(IPAddress ip, int port)
                 }
                 catch (EndOfStreamException)
                 {
-                    LogInfo("Rollback...");
+                    LogInfo($"Rollback {id} ...");
                 }
                 finally
                 {
@@ -142,47 +155,78 @@ public class FiliusServer(IPAddress ip, int port)
     private async Task HandleFrameAsync(int sourcePort, EthernetFrame frame, CancellationToken ct)
     {
         _macTable[frame.SourceMac] = sourcePort;
-
+    
+        if (frame.Payload is ArpPaket { Operation: ArpPaket.Request } arp &&
+            _respondArp.TryGetValue(arp.TargetIP, out string? respondMac))
+        {
+            EthernetFrame response = new()
+            {
+                SourceMac = respondMac,
+                DestinationMac = frame.SourceMac,
+                Type = EthernetFrame.ARP,
+                Payload = new ArpPaket
+                {
+                    ArpPacketNumber = 0,
+                    ArpPacketNumberCounter = 0,
+                    Type = EthernetFrame.IP,
+                    Operation = ArpPaket.Reply,
+                    SourceMac = respondMac,
+                    SourceIP = arp.TargetIP,
+                    TargetMac = frame.SourceMac,
+                    TargetIP = arp.SourceIP
+                }
+            };
+            await TryWriteClientAsync(sourcePort, response, ct).ConfigureAwait(false);
+            return;
+        }
+        
+        if (_macHandlers.TryGetValue(frame.DestinationMac, out Func<ProtocolDataUnit, CancellationToken, Task<ProtocolDataUnit>>? func))
+        {
+            EthernetFrame response = new()
+            {
+                SourceMac = frame.DestinationMac,
+                DestinationMac = frame.SourceMac,
+                Type = EthernetFrame.IP,
+                Payload = await func(frame.Payload, ct).ConfigureAwait(false)
+            };
+            await TryWriteClientAsync(sourcePort, response, ct).ConfigureAwait(false);
+            return;
+        }
+        
         int targetPort = _macTable.GetValueOrDefault(frame.DestinationMac, defaultValue: -1);
         if (targetPort != -1)
         {
-            Client client = _clients[targetPort];
-            try
-            {
-                await client.WriteLock.WaitAsync(ct);
-                client.Writer.WriteObject(frame);
-                await client.Stream.FlushAsync(ct);
-            }
-            catch (IOException)
-            {
-            } // In case the connection broke.
-            finally
-            {
-                client.WriteLock.Release();
-            }
+            await TryWriteClientAsync(targetPort, frame, ct).ConfigureAwait(false);
         }
         else
         {
-            Client[] targetWriters = _clients
-                .Where(kvp => kvp.Key != sourcePort)
-                .Select(kvp => kvp.Value)
-                .ToArray();
-            await Parallel.ForEachAsync(targetWriters, ct, async (client, innerCt) =>
-            {
-                try
-                {
-                    await client.WriteLock.WaitAsync(innerCt);
-                    client.Writer.WriteObject(frame);
-                    await client.Stream.FlushAsync(innerCt);
-                }
-                catch (IOException)
-                {
-                } // In case the connection broke.
-                finally
-                {
-                    client.WriteLock.Release();
-                }
-            });
+            int[] targetPorts = _clients.Keys.Except([sourcePort]).ToArray();
+            await Parallel.ForEachAsync(targetPorts, ct, async (id, innerCt) => 
+                await TryWriteClientAsync(id, frame, innerCt));
+        }
+    }
+    
+    private async Task<bool> TryWriteClientAsync(int port, EthernetFrame frame, CancellationToken ct)
+    {
+        Client client = _clients[port];
+            
+        try
+        {
+            await client.WriteLock.WaitAsync(ct);
+            
+            client.Writer.WriteObject(frame);
+            await client.Stream.FlushAsync(ct);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            if (ex is not IOException)     // Ignore in case the connection broke
+                LogError($"An error occurred while writing to client {port}: {ex}");
+            return false;
+        }
+        finally
+        {
+            client.WriteLock.Release();
         }
     }
 

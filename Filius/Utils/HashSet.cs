@@ -33,20 +33,7 @@ public class HashSet
             }
             else
             {
-                byte[] encoded = Encoding.UTF8.GetBytes(element);
-                if (encoded.Length <= 0xFFFF)
-                {
-                    writer.Write(TcString);
-                    WriteU16(writer, (ushort)encoded.Length);
-                }
-                else
-                {
-                    writer.Write(TcLongString);
-                    WriteS64(writer, encoded.Length);
-                }
-            
-                writer.Write(encoded);
-                objWriter.AssignHandle(element);
+                objWriter.WriteObject(element);
             }
         }
     }
@@ -76,23 +63,13 @@ public class HashSet
         {
             byte tag = reader.ReadByte();
 
-            string element;
-            switch (tag)
+            string element = tag switch
             {
-                case TcString:
-                    element = ReadUtf(reader);
-                    objReader.AssignHandle(element);
-                    break;
-                case TcLongString:
-                    element = ReadUtfLong(reader);
-                    objReader.AssignHandle(element);
-                    break;
-                case TcReference:
-                    element = objReader.ResolveReference(ReadS32(reader));
-                    break;
-                default:
-                    throw new NotSupportedException($"Unknown HashSet element tag: 0x{tag:X2}");
-            }
+                TcString => ReadUtf(reader),
+                TcLongString => ReadUtfLong(reader),
+                TcReference => objReader.ResolveReference(ReadS32(reader)),
+                _ => throw new NotSupportedException($"Unknown HashSet element tag: 0x{tag:X2}")
+            };
 
             Set.Add(element);
         }

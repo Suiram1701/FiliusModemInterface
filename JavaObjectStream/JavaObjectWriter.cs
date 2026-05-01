@@ -231,7 +231,7 @@ public sealed class JavaObjectWriter : IDisposable
 
     public bool TryGetHandle(object value, out int handle) => _handles.TryGetValue(value, out handle);
     
-    public void AssignHandle(object obj, int index = -1)
+    private void AssignHandle(object obj, int index = -1)
     {
         if (index == -1)
             index = _indexCounter++;

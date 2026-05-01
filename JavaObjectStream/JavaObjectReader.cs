@@ -251,7 +251,16 @@ public sealed class JavaObjectReader : IDisposable
             case TcString:
                 byte[] lenBytes2 = ReadAndStoreBytes(2, buffer);
                 int length2 = IPAddress.NetworkToHostOrder((short)BitConverter.ToUInt16(lenBytes2));
-                _ = ReadAndStoreBytes(length2, buffer);
+                byte[] content = ReadAndStoreBytes(length2, buffer);
+                
+                AssignHandle(_encoding.GetString(content));
+                break;
+            case TcLongString:
+                byte[] lenBytes3 = ReadAndStoreBytes(8, buffer);
+                long length3 = IPAddress.NetworkToHostOrder(BitConverter.ToInt64(lenBytes3));
+                byte[] data = ReadAndStoreBytes((int)length3, buffer);
+            
+                AssignHandle(Encoding.UTF8.GetString(data));
                 break;
             case TcNull:
                 break; // Nur der Tag, kein weiterer Inhalt
@@ -273,7 +282,7 @@ public sealed class JavaObjectReader : IDisposable
                 _ = ReadAndStoreBytes((int)length, buffer);
                 break;
             default:
-                throw new NotSupportedException($"Unbekannter Annotation-Tag: 0x{tag:X2}");
+                throw new NotSupportedException($"Unknown annotation tag: 0x{tag:X2}");
         }
     }
     
@@ -300,11 +309,11 @@ public sealed class JavaObjectReader : IDisposable
     
     public string ResolveReference(int handleId)
     {
-        object resolved = _handles[handleId - 0x7E0000];
+        object resolved = _handles[handleId - BaseWireHandle];
         return resolved as string ?? throw new InvalidDataException($"Handle does not point to string: {resolved.GetType().Name}");
     }
     
-    public void AssignHandle(object obj, int index = -1)
+    private void AssignHandle(object obj, int index = -1)
     {
         if (index > -1)
             _handles[index] = obj;
