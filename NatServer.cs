@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using FiliusModemInterface.Filius;
@@ -16,7 +17,7 @@ public class NatServer(IPAddress ip, int port, string natMac, IPAddress natIp) :
     private readonly string _natIp = natIp.ToString();
 
     private readonly ConcurrentDictionary<string, string> _arpTable = [];
-    
+
     private readonly ConcurrentDictionary<Connection, (UdpClient, Task)> _udpConnTrack = [];
 
     public override Task RunAsync(CancellationToken ct)
@@ -64,13 +65,7 @@ public class NatServer(IPAddress ip, int port, string natMac, IPAddress natIp) :
         switch (paket)
         {
             case IcmpPaket { Type: (int)IcmpPaket.IcmpType.EchoRequest } icmp:
-                await TryWriteClientAsync(sourcePort, new EthernetFrame
-                {
-                    SourceMac = _natMac,
-                    DestinationMac = frame.SourceMac,
-                    Type = EthernetFrame.IP,
-                    Payload = BuildIcmpPingResponse(icmp)
-                }, ct);
+                await HandleIcmpPaketAsync(sourcePort, frame, icmp, ct);
                 break;
             case IpPaket { Protocol: IpPaket.UDP } udpPaket:     // Initialize UdpClient when not already done and send data
                 Connection connection = new(udpPaket.SourceIP, udpPaket.Data.SourcePort, udpPaket.DestinationIP, udpPaket.Data.DestinationPort);
@@ -102,22 +97,68 @@ public class NatServer(IPAddress ip, int port, string natMac, IPAddress natIp) :
         }
     }
 
-    private IcmpPaket BuildIcmpPingResponse(IcmpPaket paket)
+    private async Task HandleIcmpPaketAsync(int sourcePort, EthernetFrame frame, IcmpPaket paket, CancellationToken ct)
     {
-        return new IcmpPaket
+        if (paket.DestinationIP == _natIp)
         {
-            Id = paket.Id + 1,
-            SourceIP = paket.DestinationIP,
-            DestinationIP = paket.SourceIP,
-            TTL = paket.TTL,
-            Protocol = IcmpPaket.Icmp_Protocol,
+            await TryWriteClientAsync(sourcePort, new EthernetFrame
+            {
+                SourceMac = _natMac,
+                DestinationMac = frame.SourceMac,
+                Type = EthernetFrame.IP,
+                Payload = new IcmpPaket
+                {
+                    Id = paket.Id + 1,  
+                    SourceIP = paket.DestinationIP,
+                    DestinationIP = paket.SourceIP,
+                    TTL = paket.TTL,
+                    Protocol = IcmpPaket.Icmp_Protocol,
             
-            Identifier = paket.Identifier,
-            SeqNr = paket.SeqNr,
-            Type = (int)IcmpPaket.IcmpType.EchoReply,
-            Code = paket.Code,
-            Payload = null!
-        };
+                    Identifier = paket.Identifier,
+                    SeqNr = paket.SeqNr,
+                    Type = (int)IcmpPaket.IcmpType.EchoReply,
+                    Code = paket.Code,
+                }
+            }, ct);
+            return;
+        }
+
+        using Ping pingSender = new();
+        PingReply reply = await pingSender.SendPingAsync(
+            paket.DestinationIP,
+            TimeSpan.FromSeconds(paket.TTL),
+            null,
+            new PingOptions { Ttl = paket.TTL },
+            ct);
+        await TryWriteClientAsync(sourcePort, new EthernetFrame
+        {
+            SourceMac = _natMac,
+            DestinationMac = frame.SourceMac,
+            Type = EthernetFrame.IP,
+            Payload = new IcmpPaket
+            {
+                Id = paket.Id + 1,
+                SourceIP = paket.DestinationIP,
+                DestinationIP = paket.SourceIP,
+                TTL = paket.TTL,
+                Protocol = IcmpPaket.Icmp_Protocol,
+
+                Identifier = paket.Identifier,
+                SeqNr = paket.SeqNr,
+                Type = reply.Status switch
+                {
+                    IPStatus.Success => (int)IcmpPaket.IcmpType.EchoReply,
+                    IPStatus.TimedOut or IPStatus.TimeExceeded or IPStatus.TtlExpired => (int)IcmpPaket.IcmpType.TimeExeeded,
+                    _ => (int)IcmpPaket.IcmpType.See
+                },
+                Code = reply.Status switch
+                {
+                    IPStatus.DestinationNetworkUnreachable => (int)IcmpPaket.IcmpCode.NetworkUnreachable,
+                    IPStatus.DestinationHostUnreachable => (int)IcmpPaket.IcmpCode.HostUnreachable,
+                    _ => 0
+                }
+            }
+        }, ct);
     }
 
     private async Task HandleUdpConnectionAsync(Connection connection, UdpClient udpClient, CancellationToken ct)
@@ -132,7 +173,7 @@ public class NatServer(IPAddress ip, int port, string natMac, IPAddress natIp) :
                 using MemoryStream memory = new(result.Buffer);
                 DnsMessage message = DnsMessage.Deserialize(memory);
                 message.FormatForFilius();
-                
+
                 data = message.ToString();
             }
             else

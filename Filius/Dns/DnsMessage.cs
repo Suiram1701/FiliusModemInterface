@@ -329,7 +329,7 @@ public class DnsMessage : IParsable<DnsMessage>
                     rdata = RData.Split('.').Select(byte.Parse).ToArray();
                     break;
                 case nameof(RecordType.AAAA):
-                    rdata = RData.Split(':').Select(byte.Parse).ToArray();
+                    rdata = RData.Split(':').Select(Convert.FromHexString).SelectMany(bytes => bytes).ToArray();
                     break;
                 case nameof(RecordType.CNAME):
                 case nameof(RecordType.MX):
@@ -359,14 +359,35 @@ public class DnsMessage : IParsable<DnsMessage>
             
             int length = ReadU16(reader);
             byte[] rdata = reader.ReadBytes(length);
-            string data = type switch
+            string data;
+            switch (type)
             {
-                RecordType.A => string.Join('.', rdata.Select(@byte => @byte.ToString())),
-                RecordType.AAAA => string.Join(':', rdata.Select(@byte => @byte.ToString())),
-                RecordType.CNAME or RecordType.MX or RecordType.NS => ReadDomainName(
-                    new BinaryReader(new MemoryStream(rdata), Encoding.ASCII, leaveOpen: false)),
-                _ => Encoding.ASCII.GetString(rdata)
-            };
+                case RecordType.A:
+                    data = string.Join('.', rdata.Select(@byte => @byte.ToString()));
+                    break;
+                case RecordType.AAAA:
+                    StringBuilder sb = new();
+                    for (var i = 0; i < rdata.Length / 2; i++)
+                    {
+                        if (i != 0)
+                            sb.Append(':');
+                        
+                        byte[] part = rdata[(i * 2)..((i * 2) + 2)];
+                        sb.Append(Convert.ToHexStringLower(part));
+                    }
+
+                    data = sb.ToString();
+                    break;
+                case RecordType.CNAME:
+                case RecordType.MX:
+                case RecordType.NS:
+                    reader.BaseStream.Seek(-length, SeekOrigin.Current);
+                    data = ReadDomainName(reader);
+                    break;
+                default:
+                    data = Encoding.ASCII.GetString(rdata);
+                    break;
+            }
             return new ResourceRecord(domainName, type.ToString(), data, ttl);
         }
         
