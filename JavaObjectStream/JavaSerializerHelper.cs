@@ -33,8 +33,13 @@ public static class JavaSerializerHelper
     }
 
     public static ushort ReadU16(BinaryReader reader) => (ushort)IPAddress.NetworkToHostOrder((short)reader.ReadUInt16());
+    
+    public static int    ReadU32(BinaryReader reader) => IPAddress.NetworkToHostOrder((int)reader.ReadUInt32());
+    
     public static short  ReadS16(BinaryReader reader) => IPAddress.NetworkToHostOrder(reader.ReadInt16());
+    
     public static int    ReadS32(BinaryReader reader) => IPAddress.NetworkToHostOrder(reader.ReadInt32());
+    
     public static long   ReadS64(BinaryReader reader) => IPAddress.NetworkToHostOrder(reader.ReadInt64());
 
     public static float ReadFloat(BinaryReader reader)
@@ -66,6 +71,8 @@ public static class JavaSerializerHelper
     }
 
     public static void WriteU16(BinaryWriter writer, ushort value) => writer.Write((ushort)IPAddress.HostToNetworkOrder((short)value));
+    
+    public static void WriteU32(BinaryWriter writer, int value) => writer.Write(IPAddress.HostToNetworkOrder(value));
 
     public static void WriteS16(BinaryWriter writer, short value) => writer.Write(IPAddress.HostToNetworkOrder(value));
 

@@ -75,12 +75,11 @@ public partial class Program
     
     private static Task<int> Main(string[] args)
     {
-        args = ["nat", "--mac", "0E:5F:BB:BD:F2:AC"];
-// #if DEBUG
-//         Console.Write("args: ");
-//         string str = Console.ReadLine() ?? "";
-//         args = str.Split(' ');
-// #endif
+#if DEBUG
+        Console.Write("args: ");
+        string str = Console.ReadLine() ?? "";
+        args = str.Split(' ');
+#endif
         
         RootCommand rootCommand = new("Starts a server where one or more Filius instances can connect to. It will act as a switch between these instances.")
         {
@@ -91,8 +90,8 @@ public partial class Program
         {
             IPAddress bindIp = parseResult.GetRequiredValue(_bindOption);
             int bindPort = parseResult.GetRequiredValue(_portOption);
-            FiliusServer filiusServer = new(bindIp, bindPort);
             
+            FiliusServer filiusServer = new(bindIp, bindPort);
             return filiusServer.RunAsync(ct);
         });
 
@@ -105,14 +104,11 @@ public partial class Program
         {
             IPAddress bindIp = parseResult.GetRequiredValue(_bindOption);
             int bindPort = parseResult.GetRequiredValue(_portOption);
-            FiliusServer filiusServer = new(bindIp, bindPort);
-            
             string mac = parseResult.GetRequiredValue(_macOption);
             IPAddress ip = parseResult.GetRequiredValue(_ipOption);
-            NatHandler nat = new();
-            filiusServer.RespondOn(mac, ip, nat.HandleFrameAsync);
             
-            return filiusServer.RunAsync(ct);
+            NatServer natServer = new(bindIp, bindPort, mac, ip);
+            return natServer.RunAsync(ct);
         });
         rootCommand.Add(natCommand);
         

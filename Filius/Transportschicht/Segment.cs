@@ -2,7 +2,7 @@ using FiliusModemInterface.JavaObjectStream.Attributes;
 
 namespace FiliusModemInterface.Filius.Transportschicht;
 
-[JavaClass("filius.software.transportschicht.Segment", SerialVersionUid = 1294832790258489668L)]
+[JavaClass("filius.software.transportschicht.Segment", SerialVersionUid = 1294832790258489668L)]     // Version Uid took from running filius instance
 public class Segment : ProtocolDataUnit
 {
     [JavaField("quellPort")] public int SourcePort { get; set; }

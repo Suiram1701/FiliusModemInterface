@@ -3,7 +3,6 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using FiliusModemInterface.Filius;
-using FiliusModemInterface.Filius.Vermittlungsschicht;
 using FiliusModemInterface.JavaObjectStream;
 using static FiliusModemInterface.Program;
 
@@ -19,11 +18,9 @@ public class FiliusServer(IPAddress ip, int port)
     private readonly Dictionary<int, Client> _clients = new();
     private readonly Dictionary<int, Task> _handles = new();
 
-    private readonly ConcurrentDictionary<string, int> _macTable = new();
-    private readonly Dictionary<string, string> _respondArp = [];
-    private readonly Dictionary<string, Func<ProtocolDataUnit, CancellationToken, Task<ProtocolDataUnit>>> _macHandlers = [];
+    protected readonly ConcurrentDictionary<string, int> _macTable = new();
     
-    public async Task RunAsync(CancellationToken ct)
+    public virtual async Task RunAsync(CancellationToken ct)
     {
         _listener.Start();
         try
@@ -47,17 +44,6 @@ public class FiliusServer(IPAddress ip, int port)
         catch (TaskCanceledException)
         {
         }
-    }
-
-    public bool RespondOn(string mac, IPAddress ip, Func<ProtocolDataUnit, CancellationToken, Task<ProtocolDataUnit>> onFrame)
-    {
-        if (_macHandlers.ContainsKey(mac))
-            return false;
-
-        _respondArp[ip.ToString()] = mac;
-        _macHandlers[mac] = onFrame;
-        LogInfo($"Starts responding on {ip} with {mac}");
-        return true;
     }
     
     private async Task HandleClientAsync(int id, TcpClient client, CancellationToken ct)
@@ -152,46 +138,9 @@ public class FiliusServer(IPAddress ip, int port)
             _macTable.Remove(index, out _);
     }
 
-    private async Task HandleFrameAsync(int sourcePort, EthernetFrame frame, CancellationToken ct)
+    protected virtual async Task HandleFrameAsync(int sourcePort, EthernetFrame frame, CancellationToken ct)
     {
         _macTable[frame.SourceMac] = sourcePort;
-    
-        if (frame.Payload is ArpPaket { Operation: ArpPaket.Request } arp &&
-            _respondArp.TryGetValue(arp.TargetIP, out string? respondMac))
-        {
-            EthernetFrame response = new()
-            {
-                SourceMac = respondMac,
-                DestinationMac = frame.SourceMac,
-                Type = EthernetFrame.ARP,
-                Payload = new ArpPaket
-                {
-                    ArpPacketNumber = 0,
-                    ArpPacketNumberCounter = 0,
-                    Type = EthernetFrame.IP,
-                    Operation = ArpPaket.Reply,
-                    SourceMac = respondMac,
-                    SourceIP = arp.TargetIP,
-                    TargetMac = frame.SourceMac,
-                    TargetIP = arp.SourceIP
-                }
-            };
-            await TryWriteClientAsync(sourcePort, response, ct).ConfigureAwait(false);
-            return;
-        }
-        
-        if (_macHandlers.TryGetValue(frame.DestinationMac, out Func<ProtocolDataUnit, CancellationToken, Task<ProtocolDataUnit>>? func))
-        {
-            EthernetFrame response = new()
-            {
-                SourceMac = frame.DestinationMac,
-                DestinationMac = frame.SourceMac,
-                Type = EthernetFrame.IP,
-                Payload = await func(frame.Payload, ct).ConfigureAwait(false)
-            };
-            await TryWriteClientAsync(sourcePort, response, ct).ConfigureAwait(false);
-            return;
-        }
         
         int targetPort = _macTable.GetValueOrDefault(frame.DestinationMac, defaultValue: -1);
         if (targetPort != -1)
@@ -206,7 +155,7 @@ public class FiliusServer(IPAddress ip, int port)
         }
     }
     
-    private async Task<bool> TryWriteClientAsync(int port, EthernetFrame frame, CancellationToken ct)
+    protected virtual async Task<bool> TryWriteClientAsync(int port, EthernetFrame frame, CancellationToken ct)
     {
         Client client = _clients[port];
             
